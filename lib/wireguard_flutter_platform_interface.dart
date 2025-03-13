@@ -1,3 +1,5 @@
+import 'key_pair.dart';
+
 abstract class WireGuardFlutterInterface {
   Stream<VpnStage> get vpnStageSnapshot;
 
@@ -11,6 +13,7 @@ abstract class WireGuardFlutterInterface {
 
   Future<void> stopVpn();
 
+  Future<KeyPair> generateKeyPair();
   Future<void> refreshStage();
   Future<VpnStage> stage();
   Future<bool> isConnected() =>

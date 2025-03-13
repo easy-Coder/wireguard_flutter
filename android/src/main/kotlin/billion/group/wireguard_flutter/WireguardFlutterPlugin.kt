@@ -169,6 +169,9 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "getUploadData" -> {
                 getUploadData(result)
             }
+            "generateKeyPair" -> {
+                generateKeyPair(result)
+            }
             else -> flutterNotImplemented(result)
         }
     }
@@ -293,7 +296,8 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private fun getDownloadData(result: Result) {
         scope.launch(Dispatchers.IO) {
             try {
-                val downloadData = futureBackend.await().getTransferData(tunnel(tunnelName)).rxBytes
+//                val downloadData = futureBackend.await().getTransferData(tunnel(tunnelName)).rxBytes
+                val downloadData = futureBackend.await().getStatistics(tunnel(tunnelName)).totalRx()
                 flutterSuccess(result, downloadData)
             } catch (e: Throwable) {
                 Log.e(TAG, "getDownloadData - ERROR - ${e.message}")
@@ -305,13 +309,24 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private fun getUploadData(result: Result) {
         scope.launch(Dispatchers.IO) {
             try {
-                val uploadData = futureBackend.await().getTransferData(tunnel(tunnelName)).txBytes
+//                val uploadData = futureBackend.await().getTransferData(tunnel(tunnelName)).txBytes
+                val uploadData = futureBackend.await().getStatistics(tunnel(tunnelName)).totalTx()
                 flutterSuccess(result, uploadData)
             } catch (e: Throwable) {
                 Log.e(TAG, "getUploadData - ERROR - ${e.message}")
                 flutterError(result, e.message.toString())
             }
         }
+    }
+
+    private fun generateKeyPair(result: Result) {
+        val keyPair = KeyPair()
+        result.success(
+            hashMapOf(
+                "privateKey" to keyPair.privateKey.toBase64(),
+                "publicKey" to keyPair.publicKey.toBase64()
+            )
+        )
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {

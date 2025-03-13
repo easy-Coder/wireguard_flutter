@@ -1,12 +1,14 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:wireguard_flutter/key_pair.dart';
 import 'package:wireguard_flutter/linux/wireguard_flutter_linux.dart';
 import 'package:wireguard_flutter/wireguard_flutter_method_channel.dart';
 
 import 'wireguard_flutter_platform_interface.dart';
 
 export 'wireguard_flutter_platform_interface.dart' show VpnStage;
+export 'key_pair.dart';
 
 class WireGuardFlutter extends WireGuardFlutterInterface {
   static WireGuardFlutterInterface? __instance;
@@ -59,4 +61,7 @@ class WireGuardFlutter extends WireGuardFlutterInterface {
 
   @override
   Future<VpnStage> stage() => _instance.stage();
+
+  @override
+  Future<KeyPair> generateKeyPair() => _instance.generateKeyPair();
 }

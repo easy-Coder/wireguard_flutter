@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:process_run/shell.dart';
+import 'package:wireguard_flutter/key_pair.dart';
 
 import '../wireguard_flutter_platform_interface.dart';
 
@@ -113,5 +114,11 @@ class WireGuardFlutterLinux extends WireGuardFlutterInterface {
     final processResultList = await shell.run('sudo wg');
     final process = processResultList.first;
     return process.outLines.any((line) => line.trim() == 'interface: $name');
+  }
+
+  @override
+  Future<KeyPair> generateKeyPair() {
+    // TODO: implement generateKeyPair
+    throw UnimplementedError();
   }
 }

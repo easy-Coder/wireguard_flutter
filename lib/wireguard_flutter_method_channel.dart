@@ -1,5 +1,6 @@
 import 'package:flutter/services.dart';
 
+import 'key_pair.dart';
 import 'wireguard_flutter_platform_interface.dart';
 
 class WireGuardFlutterMethodChannel extends WireGuardFlutterInterface {
@@ -57,4 +58,16 @@ class WireGuardFlutterMethodChannel extends WireGuardFlutterInterface {
               )
             : VpnStage.disconnected,
       );
+
+  @override
+  Future<KeyPair> generateKeyPair() async {
+    final result = await _methodChannel
+            .invokeMapMethod<String, String>('generateKeyPair') ??
+        <String, String>{};
+    if (!result.containsKey('publicKey') || !result.containsKey('privateKey')) {
+      throw StateError('Could not generate keypair');
+    }
+    return KeyPair(
+        publicKey: result['publicKey']!, privateKey: result['privateKey']!);
+  }
 }
