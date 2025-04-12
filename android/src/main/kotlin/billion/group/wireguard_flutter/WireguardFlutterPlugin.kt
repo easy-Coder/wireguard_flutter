@@ -19,6 +19,7 @@ import android.os.Build
 import android.util.Log
 import com.beust.klaxon.Klaxon
 import com.wireguard.android.backend.*
+import com.wireguard.config.Config
 import com.wireguard.crypto.Key
 import com.wireguard.crypto.KeyPair
 import io.flutter.plugin.common.EventChannel
@@ -28,6 +29,7 @@ import java.util.*
 
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
+import kotlinx.coroutines.CompletableDeferred
 
 /** WireguardFlutterPlugin */
 
@@ -47,10 +49,13 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private var havePermission = false
     private lateinit var context: Context
     private var activity: Activity? = null
-    private var config: com.wireguard.config.Config? = null
+    private var config: Config? = null
     private var tunnel: WireGuardTunnel? = null
     private val TAG = "NVPN"
     var isVpnChecked = false
+
+    private var permissionResultCallback: Result? = null
+
     companion object {
         private var state: String = "no_connection"
 
@@ -59,24 +64,56 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        this.havePermission =
-            (requestCode == PERMISSIONS_REQUEST_CODE) && (resultCode == Activity.RESULT_OK)
-        return havePermission
+        if (requestCode == PERMISSIONS_REQUEST_CODE) {
+            val permissionGranted = resultCode == Activity.RESULT_OK
+            this.havePermission = permissionGranted // Update the flag
+
+            // Use the stored callback to complete the initialize call
+            permissionResultCallback?.let { callback -> // 'callback' is the Result object here
+                if (permissionGranted) {
+                    Log.i(TAG, "VPN permission granted.")
+                    // Use helper to complete the initialize call successfully
+                    flutterSuccess(callback, true)
+                } else {
+                    Log.w(TAG, "VPN permission denied.")
+                    // Use helper to complete the initialize call with an error
+                    flutterError(
+                        callback,
+                        "PERMISSION_DENIED",
+                        "VPN permission was not granted by the user."
+                    )
+                }
+                permissionResultCallback = null // Clear the callback once used
+            }
+            return permissionGranted // Return if the result was handled
+        }
+        return false
     }
 
-    override fun onAttachedToActivity(activityPluginBinding: ActivityPluginBinding) {
-        this.activity = activityPluginBinding.activity as FlutterActivity
+    private var activityPluginBinding: ActivityPluginBinding? = null
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        this.activity = binding.activity as FlutterActivity
+        binding.addActivityResultListener(this) // Add listener
+        this.activityPluginBinding = binding
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         this.activity = null
     }
 
-    override fun onReattachedToActivityForConfigChanges(activityPluginBinding: ActivityPluginBinding) {
-        this.activity = activityPluginBinding.activity as FlutterActivity
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        this.activity = binding.activity as FlutterActivity
+        // Listener should still be attached unless activity was fully detached
+        if (this.activityPluginBinding == null) {
+            binding.addActivityResultListener(this)
+            this.activityPluginBinding = binding
+        }
     }
 
     override fun onDetachedFromActivity() {
+        this.activityPluginBinding?.removeActivityResultListener(this) // Remove listener
+        this.activityPluginBinding = null
         this.activity = null
     }
 
@@ -99,6 +136,8 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 isVpnChecked = false
                 vpnStageSink = events
+                // Optionally send current state on listen
+                vpnStageSink?.success(state.lowercase(Locale.ROOT))
             }
 
             override fun onCancel(arguments: Any?) {
@@ -116,15 +155,15 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return backend as Backend
     }
 
-    private fun flutterSuccess(result: Result, o: Any) {
-        scope.launch(Dispatchers.Main) {
-            result.success(o)
+    private fun flutterSuccess(result: Result, data: Any?) {
+        scope.launch(Dispatchers.Main.immediate) {
+            result.success(data)
         }
     }
 
-    private fun flutterError(result: Result, error: String) {
-        scope.launch(Dispatchers.Main) {
-            result.error(error, null, null)
+    private fun flutterError(result: Result, errorCode: String, errorMessage: String?, errorDetails: Any? = null) {
+        scope.launch(Dispatchers.Main.immediate) {
+            result.error(errorCode, errorMessage, errorDetails)
         }
     }
 
@@ -140,18 +179,6 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "initialize" -> setupTunnel(call.argument<String>("localizedDescription").toString(), result)
             "start" -> {
                 connect(call.argument<String>("wgQuickConfig").toString(), result)
-
-                if (!isVpnChecked) {
-                    if (isVpnActive()) {
-                        state = "connected"
-                        isVpnChecked = true
-                        println("VPN is active")
-                    } else {
-                        state = "disconnected"
-                        isVpnChecked = true
-                        println("VPN is not active")
-                    }
-                }
             }
             "stop" -> {
                 disconnect(result)
@@ -160,7 +187,7 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 result.success(getStatus())
             }
             "checkPermission" -> {
-                checkPermission()
+                checkPermission(result)
                 result.success(null)
             }
             "getDownloadData" -> {
@@ -213,108 +240,178 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun disconnect(result: Result) {
-        scope.launch(Dispatchers.IO) {
+        if (!::tunnelName.isInitialized || tunnelName.isEmpty()) {
+            flutterError(result, "TUNNEL_NOT_INITIALIZED", "Tunnel not initialized. Call initialize first.")
+            return
+        }
+        scope.launch(Dispatchers.IO) { // Runs on IO thread
             try {
-                if (futureBackend.await().runningTunnelNames.isEmpty()) {
-                    updateStage("disconnected")
-                    throw Exception("Tunnel is not running")
+
+                val currentTunnel = tunnel(tunnelName) { state ->
+                    scope.launch(Dispatchers.Main) {
+                        Log.i(TAG, "onStateChange - $state")
+                        updateStageFromState(state)
+                    }
                 }
-                updateStage("disconnecting")
-                futureBackend.await().setState(
-                    tunnel(tunnelName) { state ->
-                        scope.launch(Dispatchers.Main) {
-                            Log.i(TAG, "onStateChange - $state")
-                            updateStageFromState(state)
-                        }
-                    }, Tunnel.State.DOWN, config
-                )
-                Log.i(TAG, "Disconnect - success!")
-                flutterSuccess(result, "")
+
+                if (futureBackend.await().runningTunnelNames.contains(currentTunnel.getName())) {
+                    updateStage("disconnecting")
+                    futureBackend.await().setState(currentTunnel, Tunnel.State.DOWN, config)
+                    Log.i(TAG, "Disconnect - success!")
+                    flutterSuccess(result, "") // Use helper
+                } else {
+                    Log.w(TAG, "Disconnect - Tunnel '$tunnelName' is not running.")
+                    updateStage("disconnected")
+                    flutterSuccess(result, "")
+                }
+
             } catch (e: BackendException) {
                 Log.e(TAG, "Disconnect - BackendException - ERROR - ${e.reason}", e)
-                flutterError(result, e.reason.toString())
+                updateStage("disconnected") // Update stage on failure
+                // Use helper with BackendException reason as code
+                flutterError(result, e.reason.toString(), "Disconnection failed: ${e.reason}")
+
             } catch (e: Throwable) {
-                Log.e(TAG, "Disconnect - Can't disconnect from tunnel: ${e.message}")
-                flutterError(result, e.message.toString())
+                Log.e(TAG, "Disconnect - Can't disconnect from tunnel: ${e.message}", e)
+                updateStage("disconnected") // Update stage on failure
+                // Use helper with generic error code
+                flutterError(result, "DISCONNECT_ERROR", "Disconnection failed: ${e.message}")
             }
         }
     }
 
     private fun connect(wgQuickConfig: String, result: Result) {
-        scope.launch(Dispatchers.IO) {
+        if (!::tunnelName.isInitialized || tunnelName.isEmpty()) {
+            flutterError(result, "TUNNEL_NOT_INITIALIZED", "Tunnel not initialized. Call initialize first.")
+            return
+        }
+        scope.launch(Dispatchers.IO) { // Runs on IO thread
             try {
-                if (!havePermission) {
-                    checkPermission()
-                    throw Exception("Permissions are not given")
-                }
                 updateStage("prepare")
                 val inputStream = ByteArrayInputStream(wgQuickConfig.toByteArray())
                 config = com.wireguard.config.Config.parse(inputStream)
+
+                val currentTunnel = tunnel(tunnelName) { state ->
+                    scope.launch(Dispatchers.Main) {
+                        Log.i(TAG, "onStateChange - $state")
+                        updateStageFromState(state)
+                    }
+                }
+
                 updateStage("connecting")
-                futureBackend.await().setState(
-                    tunnel(tunnelName) { state ->
-                        scope.launch(Dispatchers.Main) {
-                            Log.i(TAG, "onStateChange - $state")
-                            updateStageFromState(state)
-                        }
-                    }, Tunnel.State.UP, config
-                )
+                futureBackend.await().setState(currentTunnel, Tunnel.State.UP, config)
+
                 Log.i(TAG, "Connect - success!")
                 flutterSuccess(result, "")
+
             } catch (e: BackendException) {
                 Log.e(TAG, "Connect - BackendException - ERROR - ${e.reason}", e)
-                flutterError(result, e.reason.toString())
+                updateStage("disconnected")
+                flutterError(result, e.reason.toString(), "Connection failed: ${e.reason}")
+
             } catch (e: Throwable) {
                 Log.e(TAG, "Connect - Can't connect to tunnel: $e", e)
-                flutterError(result, e.message.toString())
+                updateStage("disconnected")
+                flutterError(result, "CONNECT_ERROR", "Connection failed: ${e.message}")
             }
         }
     }
 
     private fun setupTunnel(localizedDescription: String, result: Result) {
-        scope.launch(Dispatchers.IO) {
-            if (Tunnel.isNameInvalid(localizedDescription)) {
-                flutterError(result, "Invalid Name")
-                return@launch
+        if (Tunnel.isNameInvalid(localizedDescription)) {
+            // Use helper for immediate error
+            flutterError(result, "INVALID_NAME", "Tunnel name is invalid")
+            return
+        }
+        this.tunnelName = localizedDescription
+
+        val intent = GoBackend.VpnService.prepare(this.activity)
+        if (intent != null) {
+            // Permission is required
+            havePermission = false
+            if (this.activity == null) {
+                flutterError(result, "ACTIVITY_NULL", "Cannot request permission without activity context.")
+                return
             }
-            tunnelName = localizedDescription
-            checkPermission()
-            result.success(null)
+
+            this.permissionResultCallback = result
+            try {
+                this.activity?.startActivityForResult(intent, PERMISSIONS_REQUEST_CODE)
+                Log.i(TAG, "VPN permission request initiated.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start activity for result", e)
+                this.permissionResultCallback = null
+                flutterError(result, "ACTIVITY_START_FAILED", "Could not start permission activity: ${e.message}")
+            }
+
+        } else {
+            havePermission = true
+            Log.i(TAG, "VPN permission already granted.")
+            flutterSuccess(result, true)
         }
     }
 
-    private fun checkPermission() {
+    private fun checkPermission(result: Result) {
         val intent = GoBackend.VpnService.prepare(this.activity)
         if (intent != null) {
+            // Permission is required
             havePermission = false
-            this.activity?.startActivityForResult(intent, PERMISSIONS_REQUEST_CODE)
+            if (this.activity == null) {
+                flutterError(result, "ACTIVITY_NULL", "Cannot request permission without activity context.")
+                return
+            }
+
+            this.permissionResultCallback = result
+            try {
+                this.activity?.startActivityForResult(intent, PERMISSIONS_REQUEST_CODE)
+                Log.i(TAG, "VPN permission request initiated.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start activity for result", e)
+                this.permissionResultCallback = null
+                flutterError(result, "ACTIVITY_START_FAILED", "Could not start permission activity: ${e.message}")
+            }
+
         } else {
             havePermission = true
+            Log.i(TAG, "VPN permission already granted.")
+            flutterSuccess(result, true)
         }
     }
 
     private fun getDownloadData(result: Result) {
-        scope.launch(Dispatchers.IO) {
+        if (!::tunnelName.isInitialized || tunnelName.isEmpty()) {
+            flutterError(result, "TUNNEL_NOT_INITIALIZED", "Tunnel not initialized. Call initialize first.")
+            return
+        }
+        scope.launch(Dispatchers.IO) { // Runs on IO thread
             try {
-//                val downloadData = futureBackend.await().getTransferData(tunnel(tunnelName)).rxBytes
-                val downloadData = futureBackend.await().getStatistics(tunnel(tunnelName)).totalRx()
-                flutterSuccess(result, downloadData)
+                // Ensure tunnel object exists for the call
+                val currentTunnel = tunnel(tunnelName)
+                val downloadData = futureBackend.await().getStatistics(currentTunnel).totalRx()
+                flutterSuccess(result, downloadData) // Use helper
             } catch (e: Throwable) {
-                Log.e(TAG, "getDownloadData - ERROR - ${e.message}")
-                flutterError(result, e.message.toString())
+                Log.e(TAG, "getDownloadData - ERROR - ${e.message}", e)
+                // Use helper with error code
+                flutterError(result, "GET_DATA_ERROR", "Failed to get download data: ${e.message}")
             }
         }
     }
 
     private fun getUploadData(result: Result) {
-        scope.launch(Dispatchers.IO) {
+        if (!::tunnelName.isInitialized || tunnelName.isEmpty()) {
+            flutterError(result, "TUNNEL_NOT_INITIALIZED", "Tunnel not initialized. Call initialize first.")
+            return
+        }
+        scope.launch(Dispatchers.IO) { // Runs on IO thread
             try {
-//                val uploadData = futureBackend.await().getTransferData(tunnel(tunnelName)).txBytes
-                val uploadData = futureBackend.await().getStatistics(tunnel(tunnelName)).totalTx()
-                flutterSuccess(result, uploadData)
+                // Ensure tunnel object exists for the call
+                val currentTunnel = tunnel(tunnelName)
+                val uploadData = futureBackend.await().getStatistics(currentTunnel).totalTx()
+                flutterSuccess(result, uploadData) // Use helper
             } catch (e: Throwable) {
-                Log.e(TAG, "getUploadData - ERROR - ${e.message}")
-                flutterError(result, e.message.toString())
+                Log.e(TAG, "getDownloadData - ERROR - ${e.message}", e)
+                // Use helper with error code
+                flutterError(result, "GET_DATA_ERROR", "Failed to get download data: ${e.message}")
             }
         }
     }
@@ -332,6 +429,9 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
         events.setStreamHandler(null)
+        vpnStageSink = null // Clean up sink
+        permissionResultCallback = null // Clean up callback
+        scope.cancel() // Cancel coroutines
         isVpnChecked = false
     }
 
