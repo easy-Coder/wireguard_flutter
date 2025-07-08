@@ -18,6 +18,9 @@ abstract class WireGuardFlutterInterface {
   Future<VpnStage> stage();
   Future<bool> isConnected() =>
       stage().then((stage) => stage == VpnStage.connected);
+
+  Future<int> getUploadData();
+  Future<int> getDownloadData();
 }
 
 enum VpnStage {

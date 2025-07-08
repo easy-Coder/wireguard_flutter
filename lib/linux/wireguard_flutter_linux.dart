@@ -121,4 +121,16 @@ class WireGuardFlutterLinux extends WireGuardFlutterInterface {
     // TODO: implement generateKeyPair
     throw UnimplementedError();
   }
+
+  @override
+  Future<int> getDownloadData() {
+    // TODO: implement getDownloadData
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<int> getUploadData() {
+    // TODO: implement getUploadData
+    throw UnimplementedError();
+  }
 }

@@ -70,4 +70,14 @@ class WireGuardFlutterMethodChannel extends WireGuardFlutterInterface {
     return KeyPair(
         publicKey: result['publicKey']!, privateKey: result['privateKey']!);
   }
+
+  @override
+  Future<int> getDownloadData() async {
+    return await _methodChannel.invokeMethod<int>("getDownloadData") ?? 0;
+  }
+
+  @override
+  Future<int> getUploadData() async {
+    return await _methodChannel.invokeMethod<int>("getUploadData") ?? 0;
+  }
 }

@@ -61,6 +61,10 @@ public class WireguardFlutterPlugin: NSObject, FlutterPlugin {
             
             case "dispose":
                 self.initialized = false
+            case "getUploadData":
+                self.getUploadData(result: result)
+            case "getDownloadData":
+                self.getDownloadData(result: result)
             default:
                 break
             }

@@ -64,4 +64,10 @@ class WireGuardFlutter extends WireGuardFlutterInterface {
 
   @override
   Future<KeyPair> generateKeyPair() => _instance.generateKeyPair();
+
+  @override
+  Future<int> getDownloadData() => _instance.getDownloadData();
+
+  @override
+  Future<int> getUploadData() => _instance.getUploadData();
 }
